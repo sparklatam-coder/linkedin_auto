@@ -27,8 +27,11 @@ export interface DirectMessage {
 }
 
 export interface AppConfig {
+  loginMethod: 'google' | 'direct';
   linkedinEmail: string;
   linkedinPassword: string;
+  googleEmail: string;
+  googlePassword: string;
   promoText: string;
   dataDir: string;
 }

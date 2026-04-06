@@ -41,6 +41,27 @@ async function reviewItem(
   return { status: action, finalContent: generatedContent };
 }
 
+// FIX #3: 자동 승인 모드 — run 명령에서 사용
+export async function autoApprove(): Promise<void> {
+  const replies = readReplies();
+  const messages = readMessages();
+
+  const pendingReplies = replies.filter((r) => r.status === 'pending');
+  const pendingMessages = messages.filter((m) => m.status === 'pending');
+
+  for (const reply of pendingReplies) {
+    reply.status = 'approved';
+  }
+  for (const msg of pendingMessages) {
+    msg.status = 'approved';
+  }
+
+  writeReplies(replies);
+  writeMessages(messages);
+
+  console.log(`Auto-approved ${pendingReplies.length} replies and ${pendingMessages.length} DMs.`);
+}
+
 export async function review(): Promise<void> {
   const replies = readReplies();
   const messages = readMessages();

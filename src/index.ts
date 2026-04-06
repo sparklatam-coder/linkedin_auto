@@ -14,13 +14,29 @@ program
   .version('1.0.0');
 
 program
-  .command('scrape')
-  .description('Login and scrape comments from your latest posts')
-  .option('-p, --posts <number>', 'Number of recent posts to scrape', '5')
-  .action(async (opts) => {
+  .command('run')
+  .description('Full pipeline: post URL → scrape → generate → review → send')
+  .argument('<url>', 'LinkedIn post URL')
+  .action(async (url) => {
     try {
       await login();
-      await scrape(parseInt(opts.posts, 10));
+      await scrape(url);
+      await generate();
+      await review();
+      await send();
+    } finally {
+      await closeBrowser();
+    }
+  });
+
+program
+  .command('scrape')
+  .description('Scrape comments from a specific post')
+  .argument('<url>', 'LinkedIn post URL')
+  .action(async (url) => {
+    try {
+      await login();
+      await scrape(url);
     } finally {
       await closeBrowser();
     }
@@ -28,14 +44,14 @@ program
 
 program
   .command('generate')
-  .description('Generate replies and DMs for scraped comments using Claude')
+  .description('Generate replies and DMs using Claude')
   .action(async () => {
     await generate();
   });
 
 program
   .command('review')
-  .description('Review and approve/modify/reject generated replies and DMs')
+  .description('Review and approve/modify/reject replies and DMs')
   .action(async () => {
     await review();
   });
@@ -46,22 +62,6 @@ program
   .action(async () => {
     try {
       await login();
-      await send();
-    } finally {
-      await closeBrowser();
-    }
-  });
-
-program
-  .command('run')
-  .description('Run the full pipeline: scrape → generate → review → send')
-  .option('-p, --posts <number>', 'Number of recent posts to process', '5')
-  .action(async (opts) => {
-    try {
-      await login();
-      await scrape(parseInt(opts.posts, 10));
-      await generate();
-      await review();
       await send();
     } finally {
       await closeBrowser();
