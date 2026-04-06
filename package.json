@@ -7,7 +7,12 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "tsx src/index.ts",
+    "scrape": "tsx src/index.ts scrape",
+    "generate": "tsx src/index.ts generate",
+    "review": "tsx src/index.ts review",
+    "send": "tsx src/index.ts send",
+    "run": "tsx src/index.ts run"
   },
   "keywords": [],
   "author": "",
