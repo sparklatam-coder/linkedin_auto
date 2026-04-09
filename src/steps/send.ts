@@ -240,9 +240,9 @@ export async function send(): Promise<void> {
     }
     writeContacts(contacts);
 
-    // Step 3: 대댓글
+    // Step 3: 대댓글 (1촌 여부 기준, DM 성공 여부 아님)
     let replyText: string;
-    if (c.dm.status === 'sent') {
+    if (c.isConnected) {
       replyText = `${displayName}님, DM 곧 보내드리겠습니다 :)`;
     } else {
       replyText = `${displayName}님, 1촌이어야 DM을 보내드릴 수 있습니다. 1촌 신청 부탁드립니다 :)`;
