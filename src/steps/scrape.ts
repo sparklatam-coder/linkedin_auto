@@ -67,35 +67,19 @@ export async function scrape(postUrl: string): Promise<void> {
       const contentEl = el.querySelector('.comments-comment-item__main-content');
       const timeEl = el.querySelector('time');
 
-      // 이 댓글 아래에 내 대댓글이 있는지 확인
+      // 이 댓글의 부모 DIV 안에서 내 대댓글(reply)이 있는지 확인
       let hasMyReply = false;
-      let sibling = el.nextElementSibling;
-      while (sibling) {
-        const isReply = sibling.classList.contains('comments-comment-entity--reply');
-        const isNextTopLevel = sibling.tagName === 'ARTICLE' && !isReply;
-
-        if (isNextTopLevel) break;
-
-        if (isReply) {
-          // 방법 1: reply 안의 프로필 링크가 내 프로필 URL과 일치
-          const replyLinks = sibling.querySelectorAll('a[href*="/in/"]');
+      const parentDiv = el.parentElement;
+      if (parentDiv) {
+        const replyArticles = parentDiv.querySelectorAll('article.comments-comment-entity--reply');
+        for (const reply of replyArticles) {
+          const replyLinks = reply.querySelectorAll('a[href*="/in/"]');
           for (const link of replyLinks) {
             const href = (link as HTMLAnchorElement).href || '';
             if (href.includes(myId)) { hasMyReply = true; break; }
           }
           if (hasMyReply) break;
-
-          // 방법 2: "your" 포함 (영문 LinkedIn)
-          const likeBtn = sibling.querySelector('button[aria-label*="React Like"]');
-          const likeLabel = likeBtn?.getAttribute('aria-label') || '';
-          if (likeLabel.toLowerCase().includes('your')) { hasMyReply = true; break; }
-
-          // 방법 3: "You" 텍스트
-          const metaText = sibling.querySelector('[class*="post-meta"]')?.textContent || '';
-          if (metaText.includes('You') || metaText.includes('• You')) { hasMyReply = true; break; }
         }
-
-        sibling = sibling.nextElementSibling;
       }
 
       // 좋아요 버튼의 aria-label 확인 (이미 좋아요 눌렀는지)
