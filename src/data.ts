@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import type { Comment, Reply, DirectMessage } from './types.js';
+import type { Contact } from './types.js';
 
 const DATA_DIR = path.resolve('data');
 
@@ -10,40 +10,16 @@ function ensureDataDir(): void {
   }
 }
 
-function readJson<T>(filename: string): T[] {
-  const filepath = path.join(DATA_DIR, filename);
+export function readContacts(): Contact[] {
+  const filepath = path.join(DATA_DIR, 'contacts.json');
   if (!fs.existsSync(filepath)) return [];
   return JSON.parse(fs.readFileSync(filepath, 'utf-8'));
 }
 
-function writeJson<T>(filename: string, data: T[]): void {
+export function writeContacts(contacts: Contact[]): void {
   ensureDataDir();
-  const filepath = path.join(DATA_DIR, filename);
-  fs.writeFileSync(filepath, JSON.stringify(data, null, 2), 'utf-8');
-}
-
-export function readComments(): Comment[] {
-  return readJson<Comment>('comments.json');
-}
-
-export function writeComments(comments: Comment[]): void {
-  writeJson('comments.json', comments);
-}
-
-export function readReplies(): Reply[] {
-  return readJson<Reply>('replies.json');
-}
-
-export function writeReplies(replies: Reply[]): void {
-  writeJson('replies.json', replies);
-}
-
-export function readMessages(): DirectMessage[] {
-  return readJson<DirectMessage>('messages.json');
-}
-
-export function writeMessages(messages: DirectMessage[]): void {
-  writeJson('messages.json', messages);
+  const filepath = path.join(DATA_DIR, 'contacts.json');
+  fs.writeFileSync(filepath, JSON.stringify(contacts, null, 2), 'utf-8');
 }
 
 export function readSession(): Record<string, unknown>[] | null {

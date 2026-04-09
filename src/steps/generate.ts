@@ -1,53 +1,50 @@
-import { execSync } from 'child_process';
-import { readComments, readReplies, readMessages, writeReplies, writeMessages } from '../data.js';
+import { execFileSync } from 'child_process';
+import { readContacts, writeContacts } from '../data.js';
 import { loadConfig } from '../config.js';
-import type { Reply, DirectMessage } from '../types.js';
 
 function callClaude(prompt: string): string {
   try {
-    const escaped = prompt.replace(/'/g, "'\\''");
-    const result = execSync(`claude -p '${escaped}'`, {
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+
+    const result = execFileSync('claude', ['-p', prompt], {
       encoding: 'utf-8',
       timeout: 60000,
       maxBuffer: 1024 * 1024,
+      env,
     });
     return result.trim();
   } catch (error) {
-    console.error('Claude CLI call failed:', (error as Error).message);
+    console.error('Claude CLI call failed:', (error as Error).message?.slice(0, 200));
     return '';
   }
 }
 
 export async function generate(): Promise<void> {
   const config = loadConfig();
-  const comments = readComments();
-  const existingReplies = readReplies();
-  const existingMessages = readMessages();
+  const contacts = readContacts();
 
-  const existingReplyIds = new Set(existingReplies.map((r) => r.commentId));
-  const existingMessageIds = new Set(existingMessages.map((m) => m.commentId));
-  const unreplied = comments.filter((c) => !c.alreadyReplied && !existingReplyIds.has(c.id));
+  // 대댓글이 pending이고 content 비어있는 것만 (이미 sent/skipped는 무시)
+  const toGenerate = contacts.filter(c =>
+    c.reply.status === 'pending' && c.reply.content === ''
+  );
 
-  if (unreplied.length === 0) {
+  if (toGenerate.length === 0) {
     console.log('No new comments to process.');
     return;
   }
 
-  console.log(`Generating replies and DMs for ${unreplied.length} comments...`);
+  console.log(`Generating replies and DMs for ${toGenerate.length} comments...`);
 
-  const newReplies: Reply[] = [];
-  const newMessages: DirectMessage[] = [];
-
-  for (let i = 0; i < unreplied.length; i++) {
-    const comment = unreplied[i];
-    console.log(`\n[${i + 1}/${unreplied.length}] Processing comment by ${comment.authorName}...`);
-    console.log(`  Comment: "${comment.content.slice(0, 80)}..."`);
+  for (let i = 0; i < toGenerate.length; i++) {
+    const c = toGenerate[i];
+    console.log(`\n[${i + 1}/${toGenerate.length}] ${c.authorName}: "${c.commentContent.slice(0, 50)}..."`);
 
     // Generate reply
     const replyPrompt = `You are managing a LinkedIn account. Generate a natural, warm reply to this comment on my post.
 
-My post (excerpt): "${comment.postContent.slice(0, 300)}"
-Comment by ${comment.authorName}: "${comment.content}"
+My post (excerpt): "${c.postContent.slice(0, 300)}"
+Comment by ${c.authorName}: "${c.commentContent}"
 
 Rules:
 - Write in the same language as the comment
@@ -59,22 +56,20 @@ Rules:
 
     const replyContent = callClaude(replyPrompt);
     if (replyContent) {
-      newReplies.push({
-        commentId: comment.id,
-        originalComment: comment.content,
-        generatedContent: replyContent,
-        status: 'pending',
-        finalContent: replyContent,
-      });
+      c.reply.content = replyContent;
       console.log(`  Reply: "${replyContent.slice(0, 60)}..."`);
     }
 
-    // Generate DM
-    if (!existingMessageIds.has(comment.id)) {
-      const dmPrompt = `You are managing a LinkedIn account. Generate a natural networking DM to someone who commented on my post.
+    // Generate DM (이미 sent면 스킵)
+    if (c.dm.status === 'sent' || c.dm.content) {
+      console.log(`  DM: skipped (already ${c.dm.status})`);
+      continue;
+    }
 
-Recipient: ${comment.authorName}
-Their comment on my post: "${comment.content}"
+    const dmPrompt = `You are managing a LinkedIn account. Generate a natural networking DM to someone who commented on my post.
+
+Recipient: ${c.authorName}
+Their comment on my post: "${c.commentContent}"
 Service/content to mention naturally: "${config.promoText}"
 
 Rules:
@@ -86,24 +81,14 @@ Rules:
 - Do not use hashtags or emojis
 - Output ONLY the message text, nothing else`;
 
-      const dmContent = callClaude(dmPrompt);
-      if (dmContent) {
-        newMessages.push({
-          commentId: comment.id,
-          recipientName: comment.authorName,
-          recipientProfileUrl: comment.authorProfileUrl,
-          generatedContent: dmContent,
-          status: 'pending',
-          finalContent: dmContent,
-        });
-        console.log(`  DM: "${dmContent.slice(0, 60)}..."`);
-      }
+    const dmContent = callClaude(dmPrompt);
+    if (dmContent) {
+      c.dm.content = dmContent;
+      console.log(`  DM: "${dmContent.slice(0, 60)}..."`);
     }
+
+    writeContacts(contacts); // 매 건마다 저장
   }
 
-  writeReplies([...existingReplies, ...newReplies]);
-  writeMessages([...existingMessages, ...newMessages]);
-
-  console.log(`\nGenerated ${newReplies.length} replies and ${newMessages.length} DMs`);
-  console.log('Saved to data/replies.json and data/messages.json');
+  console.log(`\nGenerated for ${toGenerate.length} contacts. Saved to data/contacts.json`);
 }

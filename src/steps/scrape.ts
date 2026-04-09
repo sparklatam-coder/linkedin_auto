@@ -1,22 +1,25 @@
 import { getPage, delay } from '../browser/puppeteer.js';
-import { writeComments } from '../data.js';
+import { readContacts, writeContacts } from '../data.js';
 import { createHash } from 'crypto';
-import type { Comment } from '../types.js';
+import type { Contact } from '../types.js';
+import type { Page } from 'puppeteer';
 
-function makeCommentId(postUrl: string, authorName: string, content: string): string {
+function makeId(postUrl: string, authorName: string, content: string): string {
   return createHash('md5').update(`${postUrl}|${authorName}|${content}`).digest('hex').slice(0, 12);
 }
 
 export async function scrape(postUrl: string): Promise<void> {
   const page = await getPage();
+  const existing = readContacts();
+  const existingIds = new Set(existing.map(c => c.id));
 
   console.log(`Opening post: ${postUrl}`);
   await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await delay(3000, 5000);
 
-  // 포스트 본문 수집
+  // 포스트 본문
   const postContent = await page.evaluate(() => {
-    const selectors = ['.feed-shared-update-v2__description', '.update-components-text', '.break-words', '[data-ad-preview="message"]'];
+    const selectors = ['.feed-shared-update-v2__description', '.update-components-text', '.break-words'];
     for (const sel of selectors) {
       const el = document.querySelector(sel);
       if (el?.textContent?.trim()) return el.textContent.trim();
@@ -32,15 +35,15 @@ export async function scrape(postUrl: string): Promise<void> {
     await delay(2000, 3000);
   }
 
-  // 댓글 더 보기
-  for (let i = 0; i < 10; i++) {
+  // 모든 댓글 로드
+  for (let i = 0; i < 30; i++) {
     const loadMore = await page.$('button.comments-comments-list__load-more-comments-button, button[aria-label*="Load more comments"], button[aria-label*="이전 댓글"]');
     if (!loadMore) break;
     await loadMore.click();
     await delay(1500, 2500);
   }
 
-  // 댓글 수집
+  // 댓글 수집 + 이미 내가 대댓글 달았는지 체크
   const rawComments = await page.evaluate(() => {
     const commentEls = document.querySelectorAll('article.comments-comment-entity:not(.comments-comment-entity--reply)');
     return Array.from(commentEls).map((el) => {
@@ -53,27 +56,117 @@ export async function scrape(postUrl: string): Promise<void> {
       const profileEl = el.querySelector('a[href*="/in/"]') as HTMLAnchorElement;
       const contentEl = el.querySelector('.comments-comment-item__main-content');
       const timeEl = el.querySelector('time');
+
+      // 이 댓글 아래에 내 대댓글이 있는지 확인
+      // LinkedIn에서 내 댓글은 "You" 또는 프로필 URL에 내 ID가 포함됨
+      let hasMyReply = false;
+      let sibling = el.nextElementSibling;
+      while (sibling) {
+        const isReply = sibling.classList.contains('comments-comment-entity--reply');
+        const isNextTopLevel = sibling.tagName === 'ARTICLE' && !isReply;
+
+        if (isNextTopLevel) break;
+
+        if (isReply) {
+          // 방법 1: "You" 텍스트 (영문 LinkedIn)
+          const metaText = sibling.querySelector('[class*="post-meta"]')?.textContent || '';
+          if (metaText.includes('You')) { hasMyReply = true; break; }
+
+          // 방법 2: 프로필 링크의 aria-label에 "You" 포함
+          const allLinks = sibling.querySelectorAll('a');
+          for (const link of allLinks) {
+            const ariaLabel = link.getAttribute('aria-label') || '';
+            if (ariaLabel.includes('You')) { hasMyReply = true; break; }
+          }
+          if (hasMyReply) break;
+
+          // 방법 3: Reply 버튼 aria-label에서 이름 매칭 시도
+          const replyLikeBtn = sibling.querySelector('button[aria-label*="React Like"]');
+          const likeLabel = replyLikeBtn?.getAttribute('aria-label') || '';
+          // "React Like to Sungchan Park's comment" — 이 패턴에서 이름 추출
+          // 내 댓글인 경우 "React Like to your comment" 또는 "your"이 포함
+          if (likeLabel.toLowerCase().includes('your')) { hasMyReply = true; break; }
+        }
+
+        sibling = sibling.nextElementSibling;
+      }
+
+      // 좋아요 버튼의 aria-label 확인 (이미 좋아요 눌렀는지)
+      const likeBtn = el.querySelector('button[aria-label*="React Like"], button[aria-label*="React"]') as HTMLButtonElement;
+      const isLiked = likeBtn?.getAttribute('aria-pressed') === 'true';
+
       return {
         authorName: authorName || 'Unknown',
         authorProfileUrl: profileEl?.href?.split('?')[0] || '',
         content: contentEl?.textContent?.trim() || '',
         timestamp: timeEl?.getAttribute('datetime') || new Date().toISOString(),
+        hasMyReply,
+        isLiked,
       };
     });
   });
 
-  const comments: Comment[] = rawComments.map((raw) => ({
-    id: makeCommentId(postUrl, raw.authorName, raw.content),
-    postUrl,
-    postContent: postContent.slice(0, 500),
-    authorName: raw.authorName,
-    authorProfileUrl: raw.authorProfileUrl,
-    content: raw.content,
-    timestamp: raw.timestamp,
-    alreadyReplied: false,
-  }));
+  // 좋아요 누르기 (아직 안 누른 댓글만)
+  console.log('\nLiking comments...');
+  let likeCount = 0;
+  for (let i = 0; i < rawComments.length; i++) {
+    if (!rawComments[i].isLiked) {
+      const liked = await page.evaluate((idx: number) => {
+        const commentEls = document.querySelectorAll('article.comments-comment-entity:not(.comments-comment-entity--reply)');
+        const el = commentEls[idx];
+        if (!el) return false;
+        const likeBtn = el.querySelector('button[aria-label*="React Like"]') as HTMLButtonElement;
+        if (likeBtn && likeBtn.getAttribute('aria-pressed') !== 'true') {
+          likeBtn.click();
+          return true;
+        }
+        return false;
+      }, i);
+      if (liked) {
+        likeCount++;
+        await delay(500, 1000);
+      }
+    }
+  }
+  console.log(`  Liked ${likeCount} comments`);
 
-  writeComments(comments);
-  console.log(`\n${comments.length} comments saved.`);
-  comments.forEach((c, i) => console.log(`  ${i + 1}. ${c.authorName}: "${c.content.slice(0, 50)}"`));
+  // Contact 객체 생성 (기존 데이터와 병합)
+  let newCount = 0;
+  for (const raw of rawComments) {
+    const id = makeId(postUrl, raw.authorName, raw.content);
+    if (existingIds.has(id)) continue; // 이미 있으면 스킵 (대댓글/DM 상태 유지)
+
+    const contact: Contact = {
+      id,
+      postUrl,
+      postContent: postContent.slice(0, 500),
+      authorName: raw.authorName,
+      authorProfileUrl: raw.authorProfileUrl,
+      commentContent: raw.content,
+      commentTimestamp: raw.timestamp,
+      isConnected: null,
+      liked: true,
+      reply: {
+        status: raw.hasMyReply ? 'skipped' : 'pending',
+        content: '',
+      },
+      dm: {
+        status: 'pending',
+        content: '',
+      },
+    };
+    existing.push(contact);
+    newCount++;
+  }
+
+  writeContacts(existing);
+
+  const total = existing.filter(c => c.postUrl === postUrl).length;
+  const skipped = existing.filter(c => c.postUrl === postUrl && c.reply.status === 'skipped').length;
+  const pending = existing.filter(c => c.postUrl === postUrl && c.reply.status === 'pending').length;
+
+  console.log(`\nTotal: ${total} comments (${newCount} new, ${skipped} already replied, ${pending} pending)`);
+  existing.filter(c => c.postUrl === postUrl && c.reply.status === 'pending').forEach((c, i) =>
+    console.log(`  ${i + 1}. ${c.authorName}: "${c.commentContent.slice(0, 50)}"`)
+  );
 }

@@ -1,115 +1,54 @@
-import inquirer from 'inquirer';
 import chalk from 'chalk';
-import { readReplies, readMessages, readComments, writeReplies, writeMessages } from '../data.js';
-import type { Reply, DirectMessage } from '../types.js';
+import { readContacts, writeContacts } from '../data.js';
 
-async function reviewItem(
-  type: string,
-  recipient: string,
-  originalComment: string,
-  generatedContent: string
-): Promise<{ status: 'approved' | 'modified' | 'rejected'; finalContent: string }> {
-  console.log(chalk.cyan(`\n─── ${type} to ${recipient} ───`));
-  console.log(chalk.gray(`Original comment: "${originalComment}"`));
-  console.log(chalk.white(`\n${generatedContent}\n`));
-
-  const { action } = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'action',
-      message: 'Action:',
-      choices: [
-        { name: chalk.green('Approve'), value: 'approved' },
-        { name: chalk.yellow('Modify'), value: 'modified' },
-        { name: chalk.red('Reject'), value: 'rejected' },
-      ],
-    },
-  ]);
-
-  if (action === 'modified') {
-    const { edited } = await inquirer.prompt([
-      {
-        type: 'editor',
-        name: 'edited',
-        message: 'Edit the content:',
-        default: generatedContent,
-      },
-    ]);
-    return { status: 'modified', finalContent: edited.trim() };
-  }
-
-  return { status: action, finalContent: generatedContent };
-}
-
-// FIX #3: 자동 승인 모드 — run 명령에서 사용
+// 자동 승인 — pending → approved
 export async function autoApprove(): Promise<void> {
-  const replies = readReplies();
-  const messages = readMessages();
+  const contacts = readContacts();
+  let replyCount = 0;
+  let dmCount = 0;
 
-  const pendingReplies = replies.filter((r) => r.status === 'pending');
-  const pendingMessages = messages.filter((m) => m.status === 'pending');
-
-  for (const reply of pendingReplies) {
-    reply.status = 'approved';
+  for (const c of contacts) {
+    if (c.reply.status === 'pending' && c.reply.content) {
+      c.reply.status = 'approved';
+      replyCount++;
+    }
+    if (c.dm.status === 'pending' && c.dm.content) {
+      c.dm.status = 'approved';
+      dmCount++;
+    }
   }
-  for (const msg of pendingMessages) {
-    msg.status = 'approved';
-  }
 
-  writeReplies(replies);
-  writeMessages(messages);
-
-  console.log(`Auto-approved ${pendingReplies.length} replies and ${pendingMessages.length} DMs.`);
+  writeContacts(contacts);
+  console.log(`Auto-approved ${replyCount} replies and ${dmCount} DMs.`);
 }
 
+// 상태 요약 표시
 export async function review(): Promise<void> {
-  const replies = readReplies();
-  const messages = readMessages();
-  const comments = readComments();
+  const contacts = readContacts();
 
-  const commentMap = new Map(comments.map((c) => [c.id, c]));
+  console.log(chalk.bold('\n=== Contact Status ===\n'));
 
-  const pendingReplies = replies.filter((r) => r.status === 'pending');
-  if (pendingReplies.length > 0) {
-    console.log(chalk.bold(`\n=== Reviewing ${pendingReplies.length} Replies ===`));
+  for (const c of contacts) {
+    const replyIcon = c.reply.status === 'sent' ? '✓' : c.reply.status === 'skipped' ? '–' : c.reply.status === 'approved' ? '◎' : '○';
+    const dmIcon = c.dm.status === 'sent' ? '✓' : c.dm.status === 'not-connected' ? '✗' : c.dm.status === 'approved' ? '◎' : '○';
+    const connIcon = c.isConnected === true ? '1촌' : c.isConnected === false ? '2촌+' : '?';
 
-    for (const reply of pendingReplies) {
-      const comment = commentMap.get(reply.commentId);
-      const result = await reviewItem(
-        'Reply',
-        comment?.authorName || 'Unknown',
-        reply.originalComment,
-        reply.generatedContent
-      );
-      reply.status = result.status;
-      reply.finalContent = result.finalContent;
-    }
-  } else {
-    console.log('No pending replies to review.');
+    console.log(`${replyIcon} Reply | ${dmIcon} DM | [${connIcon}] ${c.authorName}: "${c.commentContent.slice(0, 30)}"`);
   }
 
-  const pendingMessages = messages.filter((m) => m.status === 'pending');
-  if (pendingMessages.length > 0) {
-    console.log(chalk.bold(`\n=== Reviewing ${pendingMessages.length} DMs ===`));
+  const summary = {
+    total: contacts.length,
+    replySent: contacts.filter(c => c.reply.status === 'sent').length,
+    replySkipped: contacts.filter(c => c.reply.status === 'skipped').length,
+    replyPending: contacts.filter(c => c.reply.status === 'pending').length,
+    replyApproved: contacts.filter(c => c.reply.status === 'approved').length,
+    dmSent: contacts.filter(c => c.dm.status === 'sent').length,
+    dmNotConn: contacts.filter(c => c.dm.status === 'not-connected').length,
+    dmPending: contacts.filter(c => c.dm.status === 'pending').length,
+    dmApproved: contacts.filter(c => c.dm.status === 'approved').length,
+  };
 
-    for (const msg of pendingMessages) {
-      const result = await reviewItem(
-        'DM',
-        msg.recipientName,
-        commentMap.get(msg.commentId)?.content || '',
-        msg.generatedContent
-      );
-      msg.status = result.status;
-      msg.finalContent = result.finalContent;
-    }
-  } else {
-    console.log('No pending DMs to review.');
-  }
-
-  writeReplies(replies);
-  writeMessages(messages);
-
-  const approvedReplies = replies.filter((r) => r.status === 'approved' || r.status === 'modified').length;
-  const approvedDMs = messages.filter((m) => m.status === 'approved' || m.status === 'modified').length;
-  console.log(chalk.bold(`\nSummary: ${approvedReplies} replies and ${approvedDMs} DMs approved for sending.`));
+  console.log(chalk.bold(`\nSummary: ${summary.total} contacts`));
+  console.log(`  Reply: ${summary.replySent} sent, ${summary.replyApproved} approved, ${summary.replyPending} pending, ${summary.replySkipped} skipped`);
+  console.log(`  DM: ${summary.dmSent} sent, ${summary.dmApproved} approved, ${summary.dmPending} pending, ${summary.dmNotConn} not connected`);
 }

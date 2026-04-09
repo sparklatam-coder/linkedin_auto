@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { login } from './steps/login.js';
 import { scrape } from './steps/scrape.js';
 import { generate } from './steps/generate.js';
-import { review } from './steps/review.js';
+import { review, autoApprove } from './steps/review.js';
 import { send } from './steps/send.js';
 import { closeBrowser } from './browser/puppeteer.js';
 
@@ -11,18 +11,17 @@ const program = new Command();
 program
   .name('linkedin-auto')
   .description('LinkedIn comment reply & DM automation tool')
-  .version('1.0.0');
+  .version('2.0.0');
 
 program
   .command('run')
-  .description('Full pipeline: post URL → scrape → generate → review → send')
+  .description('Full pipeline: scrape → approve → 1촌체크 → DM → 대댓글')
   .argument('<url>', 'LinkedIn post URL')
   .action(async (url) => {
     try {
       await login();
       await scrape(url);
-      await generate();
-      await review();
+      await autoApprove();
       await send();
     } finally {
       await closeBrowser();
@@ -31,7 +30,7 @@ program
 
 program
   .command('scrape')
-  .description('Scrape comments from a specific post')
+  .description('Scrape comments + like + check already replied')
   .argument('<url>', 'LinkedIn post URL')
   .action(async (url) => {
     try {
@@ -44,21 +43,28 @@ program
 
 program
   .command('generate')
-  .description('Generate replies and DMs using Claude')
+  .description('Generate replies and DMs using Claude (optional)')
   .action(async () => {
     await generate();
   });
 
 program
-  .command('review')
-  .description('Review and approve/modify/reject replies and DMs')
+  .command('approve')
+  .description('Auto-approve all pending replies and DMs')
+  .action(async () => {
+    await autoApprove();
+  });
+
+program
+  .command('status')
+  .description('Show status of all contacts')
   .action(async () => {
     await review();
   });
 
 program
   .command('send')
-  .description('Send approved replies and DMs')
+  .description('1촌체크 → DM(1촌만) → 대댓글(DM결과에 따라)')
   .action(async () => {
     try {
       await login();

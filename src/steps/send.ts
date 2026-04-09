@@ -1,135 +1,97 @@
 import { getPage, delay } from '../browser/puppeteer.js';
-import { readReplies, readMessages, readComments, writeReplies, writeMessages } from '../data.js';
+import { readContacts, writeContacts } from '../data.js';
 import chalk from 'chalk';
+import type { Contact } from '../types.js';
 import type { Page } from 'puppeteer';
 
-// FIX #2: 대댓글 전송 — 현재 LinkedIn DOM에 맞게 셀렉터 수정
-async function sendReply(page: Page, postUrl: string, commentContent: string, replyText: string): Promise<boolean> {
+// --- 1촌 여부 체크 ---
+async function checkConnection(page: Page, contact: Contact): Promise<boolean> {
+  await page.goto(contact.authorProfileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await delay(2000, 3000);
+
+  const hasMessage = await page.evaluate(() => {
+    const links = document.querySelectorAll('a');
+    for (const link of links) {
+      if (link.textContent?.trim() === 'Message' || link.textContent?.trim() === '메시지') return true;
+    }
+    return false;
+  });
+
+  return hasMessage;
+}
+
+// --- 댓글을 찾을 때까지 더 보기 반복 클릭 ---
+async function findAndClickReply(page: Page, authorName: string): Promise<string> {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const found = await page.evaluate((targetAuthor: string) => {
+      const commentEls = document.querySelectorAll('article.comments-comment-entity:not(.comments-comment-entity--reply)');
+      for (const el of commentEls) {
+        let name = '';
+        const nameSelectors = ['a span.hoverable-link-text', '.comments-post-meta__name-text span', 'a[href*="/in/"] span', 'span[dir="ltr"]'];
+        for (const sel of nameSelectors) {
+          const found = el.querySelector(sel);
+          if (found?.textContent?.trim()) { name = found.textContent.trim(); break; }
+        }
+        if (!(name.includes(targetAuthor) || targetAuthor.includes(name))) continue;
+
+        const replyBtn = el.querySelector('button[aria-label*="Reply"], button[aria-label*="답글"]') as HTMLButtonElement;
+        if (replyBtn) { replyBtn.click(); return 'matched:' + name; }
+        return 'no-reply-btn:' + name;
+      }
+      return 'not-found';
+    }, authorName);
+
+    if (found !== 'not-found') return found;
+
+    const loadMore = await page.$('button.comments-comments-list__load-more-comments-button, button[aria-label*="Load more comments"], button[aria-label*="이전 댓글"]');
+    if (!loadMore) return 'no-comment';
+    await loadMore.click();
+    await delay(1500, 2500);
+  }
+  return 'no-comment';
+}
+
+// --- 대댓글 전송 ---
+async function sendReply(page: Page, postUrl: string, authorName: string, replyText: string): Promise<boolean> {
   try {
     await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await delay(3000, 5000);
 
-    // Expand comments if needed
     const showCommentsBtn = await page.$('button[aria-label*="comment"], button.social-details-social-counts__comments-count');
     if (showCommentsBtn) {
       await showCommentsBtn.click();
       await delay(2000, 3000);
     }
 
-    // Load more comments
-    for (let i = 0; i < 5; i++) {
-      const loadMore = await page.$('button.comments-comments-list__load-more-comments-button, button[aria-label*="이전 댓글"]');
-      if (!loadMore) break;
-      await loadMore.click();
-      await delay(1500, 2500);
-    }
+    const found = await findAndClickReply(page, authorName);
+    console.log(`  Reply target: ${found}`);
 
-    // DEBUG: 먼저 댓글 내부의 버튼 구조를 파악
-    const debugInfo = await page.evaluate((targetContent: string) => {
-      const commentEls = document.querySelectorAll('article.comments-comment-entity:not(.comments-comment-entity--reply)');
-      for (const el of commentEls) {
-        const content = el.querySelector('.comments-comment-item__main-content')?.textContent?.trim();
-        if (content && content.includes(targetContent.slice(0, 50))) {
-          const allBtns = el.querySelectorAll('button');
-          const btnInfo = Array.from(allBtns).map(b => ({
-            text: b.textContent?.trim().slice(0, 30),
-            ariaLabel: b.getAttribute('aria-label')?.slice(0, 50),
-            classes: Array.from(b.classList).join(' '),
-          }));
-          return { found: true, buttons: btnInfo };
-        }
-      }
-      return { found: false, buttons: [] };
-    }, commentContent);
-    console.log(`  DEBUG buttons in comment: ${JSON.stringify(debugInfo)}`);
-
-    // Find the target comment and click the reply button
-    const found = await page.evaluate((targetContent: string) => {
-      const commentEls = document.querySelectorAll('article.comments-comment-entity:not(.comments-comment-entity--reply)');
-      for (const el of commentEls) {
-        const content = el.querySelector('.comments-comment-item__main-content')?.textContent?.trim();
-        if (content && content.includes(targetContent.slice(0, 50))) {
-          // 방법 1: aria-label로 찾기
-          const replyBtn = el.querySelector('button[aria-label*="Reply"], button[aria-label*="답글"]') as HTMLButtonElement;
-          if (replyBtn) { replyBtn.click(); return 'aria-label'; }
-
-          // 방법 2: 클래스로 찾기
-          const replyBtn2 = el.querySelector('button.comments-comment-social-bar__reply-action-button') as HTMLButtonElement;
-          if (replyBtn2) { replyBtn2.click(); return 'class'; }
-
-          // 방법 3: 텍스트로 찾기
-          const allBtns = el.querySelectorAll('button');
-          for (const btn of allBtns) {
-            const text = btn.textContent?.trim().toLowerCase() || '';
-            if (text === 'reply' || text === '답글' || text.includes('reply') || text.includes('답글')) {
-              btn.click();
-              return 'text:' + text;
-            }
-          }
-          return 'no-reply-btn';
-        }
-      }
-      return 'no-comment';
-    }, commentContent);
-    console.log(`  DEBUG reply button result: ${found}`);
-
-    if (found === 'no-comment' || found === 'no-reply-btn') {
-      console.log(chalk.yellow(`  Could not find comment or reply button (${found})`));
-      return false;
-    }
+    if (found === 'no-comment' || found.startsWith('no-reply-btn')) return false;
 
     await delay(2000, 3000);
 
-    // DEBUG: reply input 구조 확인
-    const inputDebug = await page.evaluate(() => {
-      const editors = document.querySelectorAll('.ql-editor');
-      return Array.from(editors).map((el, i) => {
-        const parent = el.closest('[class*="comment"]');
-        return {
-          index: i,
-          parentClasses: parent ? Array.from(parent.classList).join(' ').slice(0, 80) : 'none',
-          placeholder: el.getAttribute('data-placeholder')?.slice(0, 30),
-          contenteditable: el.getAttribute('contenteditable'),
-        };
-      });
-    });
-    console.log(`  DEBUG editors found: ${JSON.stringify(inputDebug)}`);
-
-    // 대댓글 입력란 찾기 — 가장 마지막에 나타난 에디터가 답글용
-    // 포스트 댓글 입력란(첫 번째)이 아닌, 답글 버튼 클릭 후 새로 나타난 에디터를 찾아야 함
     const allEditors = await page.$$('.ql-editor[contenteditable="true"]');
-    if (allEditors.length === 0) {
-      console.log(chalk.yellow('  Could not find any editor'));
-      return false;
-    }
+    if (allEditors.length === 0) return false;
 
-    // 마지막 에디터가 대댓글용 (답글 버튼 클릭 후 새로 생긴 것)
     const replyInput = allEditors[allEditors.length - 1];
     await replyInput.click();
     await delay(300, 500);
     await page.keyboard.type(replyText, { delay: 30 });
-
     await delay(500, 1000);
 
-    // Submit — 마지막 submit 버튼이 대댓글 전송용
     const submitBtns = await page.$$('button.comments-comment-box__submit-button--cr, button.comments-comment-box__submit-button');
     if (submitBtns.length > 0) {
-      const lastSubmit = submitBtns[submitBtns.length - 1];
-      await lastSubmit.click();
+      await submitBtns[submitBtns.length - 1].click();
       await delay(2000, 3000);
       return true;
     }
 
-    // Fallback: aria-label로 찾기
     const fallbackBtns = await page.$$('button[aria-label*="Submit"], button[aria-label*="게시"]');
     if (fallbackBtns.length > 0) {
-      const lastFallback = fallbackBtns[fallbackBtns.length - 1];
-      await lastFallback.click();
+      await fallbackBtns[fallbackBtns.length - 1].click();
       await delay(2000, 3000);
       return true;
     }
-
-    console.log(chalk.yellow('  Could not find submit button'));
     return false;
   } catch (error) {
     console.error(chalk.red(`  Error: ${(error as Error).message}`));
@@ -137,191 +99,59 @@ async function sendReply(page: Page, postUrl: string, commentContent: string, re
   }
 }
 
-// FIX #4: DM 버튼 셀렉터 대폭 확장
-async function sendDM(page: Page, recipientProfileUrl: string, recipientName: string, messageText: string): Promise<boolean> {
+// --- DM 전송 ---
+async function sendDM(page: Page, profileUrl: string, messageText: string): Promise<boolean> {
   try {
-    // 프로필 페이지로 이동
-    await page.goto(recipientProfileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await delay(3000, 5000);
 
-    // DEBUG: 프로필 페이지의 버튼들 확인
-    const profileBtnDebug = await page.evaluate(() => {
-      const btns = document.querySelectorAll('button, a');
-      const relevant = Array.from(btns).filter(b => {
-        const text = (b.textContent?.trim() || '').toLowerCase();
-        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-        return text.includes('message') || text.includes('메시지') || text.includes('connect') || text.includes('팔로우') || text.includes('follow') || aria.includes('message') || aria.includes('메시지');
-      }).map(b => ({
-        tag: b.tagName,
-        text: b.textContent?.trim().slice(0, 30),
-        ariaLabel: b.getAttribute('aria-label')?.slice(0, 50),
-        classes: Array.from(b.classList).join(' ').slice(0, 60),
-      }));
-      return relevant;
-    });
-    console.log(`  DEBUG profile buttons: ${JSON.stringify(profileBtnDebug)}`);
-
-    // "Message" / "메시지" 버튼 찾기 — 다양한 셀렉터 시도
-    let messageBtnFound = false;
-
-    // 방법 1: 프로필 페이지의 Message 링크(<a> 태그)의 href를 가져와서 직접 이동
     const messageHref = await page.evaluate(() => {
-      // 프로필 상단의 Message 링크 찾기 (첫 번째 것이 해당 프로필의 메시지 링크)
       const links = document.querySelectorAll('a');
       for (const link of links) {
-        const text = link.textContent?.trim();
-        if (text === 'Message' || text === '메시지') {
-          return link.href;
-        }
+        if (link.textContent?.trim() === 'Message' || link.textContent?.trim() === '메시지') return link.href;
       }
       return null;
     });
 
-    if (messageHref) {
-      console.log(`  Found message link: ${messageHref}`);
-      await page.goto(messageHref, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      messageBtnFound = true;
-    }
+    if (!messageHref) return false;
 
-    // 방법 2: button으로 시도
-    if (!messageBtnFound) {
-      const directSelectors = [
-        'button.message-anywhere-button',
-        'button[aria-label*="Message"]',
-        'button[aria-label*="메시지"]',
-      ];
-      for (const sel of directSelectors) {
-        const btn = await page.$(sel);
-        if (btn) {
-          await btn.click();
-          messageBtnFound = true;
-          break;
-        }
-      }
-    }
-
-    // 방법 3: 메시징 compose 페이지로 직접 이동
-    if (!messageBtnFound) {
-      console.log(chalk.yellow(`  Profile message button not found. Using messaging compose...`));
-      await page.goto('https://www.linkedin.com/messaging/thread/new/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await delay(3000, 5000);
-
-      const searchInput = await page.$('input[role="combobox"], input[name="searchTerm"], input.msg-connections-typeahead__search-field');
-      if (!searchInput) {
-        console.log(chalk.yellow('  Could not find recipient search'));
-        return false;
-      }
-
-      await searchInput.click();
-      await searchInput.type(recipientName, { delay: 50 });
-      await delay(2000, 3000);
-
-      const suggestion = await page.$('.msg-connections-typeahead__suggestion, [role="option"], li.basic-typeahead__selectable');
-      if (suggestion) {
-        await suggestion.click();
-        await delay(1000, 2000);
-      } else {
-        console.log(chalk.yellow('  Could not find recipient in search results'));
-        return false;
-      }
-    }
-
-    // 메시지 창이 열릴 때까지 충분히 대기
+    await page.goto(messageHref, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await delay(3000, 5000);
 
-    // DEBUG: 메시지 입력란 구조 확인
-    const dmDebug = await page.evaluate(() => {
-      const url = window.location.href;
-      const contentEditables = document.querySelectorAll('[contenteditable="true"]');
-      const textboxes = document.querySelectorAll('[role="textbox"]');
-      const msgForms = document.querySelectorAll('[class*="msg-form"]');
-      return {
-        url,
-        contentEditables: Array.from(contentEditables).map(el => ({
-          tag: el.tagName,
-          classes: Array.from(el.classList).join(' ').slice(0, 60),
-          placeholder: el.getAttribute('data-placeholder') || el.getAttribute('aria-placeholder') || el.getAttribute('aria-label') || '',
-        })),
-        textboxCount: textboxes.length,
-        msgFormCount: msgForms.length,
-      };
-    });
-    console.log(`  DEBUG DM page: ${JSON.stringify(dmDebug)}`);
-
-    // 메시지 입력 필드 찾기
-    const msgInputSelectors = [
-      '.msg-form__contenteditable',
-      '.msg-form__msg-content-container .ql-editor',
-      'div[role="textbox"][contenteditable="true"]',
-      '.msg-form__message-texteditor .ql-editor',
-      'div.msg-form__contenteditable[contenteditable="true"]',
-      'p[data-placeholder]',
-    ];
-
+    const msgInputSelectors = ['.msg-form__contenteditable', 'div[role="textbox"][contenteditable="true"]', '.msg-form__message-texteditor .ql-editor'];
     let msgInput = null;
     for (const sel of msgInputSelectors) {
       msgInput = await page.$(sel);
-      if (msgInput) { console.log(`  Found input via: ${sel}`); break; }
+      if (msgInput) break;
     }
-
     if (!msgInput) {
-      // Retry after more wait
       await delay(3000, 5000);
       for (const sel of msgInputSelectors) {
         msgInput = await page.$(sel);
-        if (msgInput) { console.log(`  Found input via (retry): ${sel}`); break; }
+        if (msgInput) break;
       }
     }
-
-    if (!msgInput) {
-      console.log(chalk.yellow('  Could not find message input'));
-      return false;
-    }
+    if (!msgInput) return false;
 
     await msgInput.click();
     await delay(500, 1000);
-    await page.keyboard.type(messageText, { delay: 30 });
-    await delay(500, 1000);
-
-    // DEBUG: 전송 버튼 구조 확인
-    const sendBtnDebug = await page.evaluate(() => {
-      const btns = document.querySelectorAll('button');
-      const msgBtns = Array.from(btns).filter(b => {
-        const text = (b.textContent?.trim() || '').toLowerCase();
-        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-        const cls = Array.from(b.classList).join(' ');
-        return text.includes('send') || text.includes('보내기') || aria.includes('send') || aria.includes('보내기') || cls.includes('msg-form') || cls.includes('send');
-      }).map(b => ({
-        text: b.textContent?.trim().slice(0, 20),
-        ariaLabel: b.getAttribute('aria-label')?.slice(0, 30),
-        classes: Array.from(b.classList).join(' ').slice(0, 60),
-        disabled: b.disabled,
-      }));
-      return msgBtns;
-    });
-    console.log(`  DEBUG send buttons: ${JSON.stringify(sendBtnDebug)}`);
-
-    // 전송 버튼 — 다양한 셀렉터 시도
-    const sendSelectors = [
-      'button.msg-form__send-button',
-      'button.msg-form__send-btn',
-      'button[aria-label*="Send"]',
-      'button[aria-label*="보내기"]',
-      'button[type="submit"]',
-    ];
-
-    for (const sel of sendSelectors) {
-      const sendBtn = await page.$(sel);
-      if (sendBtn) {
-        console.log(`  Found send button via: ${sel}`);
-        await sendBtn.click();
-        await delay(2000, 3000);
-        return true;
+    const lines = messageText.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      await page.keyboard.type(lines[i], { delay: 20 });
+      if (i < lines.length - 1) {
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Enter');
+        await page.keyboard.up('Shift');
       }
     }
+    await delay(500, 1000);
 
-    // Fallback: Enter 키로 전송 (LinkedIn 메시지는 Enter로 전송)
-    console.log('  Trying Enter key to send...');
+    const sendSelectors = ['button.msg-form__send-button', 'button[aria-label*="Send"]', 'button[aria-label*="보내기"]'];
+    for (const sel of sendSelectors) {
+      const sendBtn = await page.$(sel);
+      if (sendBtn) { await sendBtn.click(); await delay(2000, 3000); return true; }
+    }
+
     await page.keyboard.press('Enter');
     await delay(2000, 3000);
     return true;
@@ -331,63 +161,86 @@ async function sendDM(page: Page, recipientProfileUrl: string, recipientName: st
   }
 }
 
+// --- 이름에서 호칭 추출 ---
+function getDisplayName(name: string): string {
+  const kor = name.match(/[가-힣]+/g);
+  if (kor) return kor.join('');
+  return name.split(/[\s(,]/)[0];
+}
+
+// --- 메인 send 함수 ---
 export async function send(): Promise<void> {
   const page = await getPage();
-  const replies = readReplies();
-  const messages = readMessages();
-  const comments = readComments();
+  const contacts = readContacts();
 
-  const commentMap = new Map(comments.map((c) => [c.id, c]));
-
-  const approvedReplies = replies.filter((r) => r.status === 'approved' || r.status === 'modified');
-  if (approvedReplies.length > 0) {
-    console.log(chalk.bold(`\nSending ${approvedReplies.length} replies...`));
-
-    for (let i = 0; i < approvedReplies.length; i++) {
-      const reply = approvedReplies[i];
-      const comment = commentMap.get(reply.commentId);
-      if (!comment) continue;
-
-      console.log(`[${i + 1}/${approvedReplies.length}] Replying to ${comment.authorName}...`);
-      const success = await sendReply(page, comment.postUrl, comment.content, reply.finalContent);
-
-      if (success) {
-        reply.status = 'sent';
-        console.log(chalk.green('  Sent!'));
-      } else {
-        reply.status = 'failed';
-        console.log(chalk.red('  Failed'));
-      }
-
-      writeReplies(replies);
-      await delay(3000, 7000);
-    }
+  // dm.status === 'approved' 인 사람만 처리 (reply는 DM 결과 후 자동)
+  const toProcess = contacts.filter(c => c.dm.status === 'approved');
+  if (toProcess.length === 0) {
+    console.log('Nothing to send.');
+    return;
   }
 
-  const approvedDMs = messages.filter((m) => m.status === 'approved' || m.status === 'modified');
-  if (approvedDMs.length > 0) {
-    console.log(chalk.bold(`\nSending ${approvedDMs.length} DMs...`));
+  console.log(chalk.bold(`\nProcessing ${toProcess.length} people...\n`));
 
-    for (let i = 0; i < approvedDMs.length; i++) {
-      const msg = approvedDMs[i];
-      console.log(`[${i + 1}/${approvedDMs.length}] DMing ${msg.recipientName}...`);
+  for (let i = 0; i < toProcess.length; i++) {
+    const c = toProcess[i];
+    const displayName = getDisplayName(c.authorName);
+    console.log(chalk.bold(`[${i + 1}/${toProcess.length}] ${c.authorName}`));
 
-      const success = await sendDM(page, msg.recipientProfileUrl, msg.recipientName, msg.finalContent);
-
-      if (success) {
-        msg.status = 'sent';
-        console.log(chalk.green('  Sent!'));
-      } else {
-        msg.status = 'failed';
-        console.log(chalk.red('  Failed'));
-      }
-
-      writeMessages(messages);
-      await delay(5000, 10000);
+    // Step 1: 1촌 체크 (미확인이면)
+    if (c.isConnected === null) {
+      c.isConnected = await checkConnection(page, c);
+      console.log(`  1촌: ${c.isConnected ? chalk.green('Yes') : chalk.yellow('No')}`);
+      writeContacts(contacts);
+      await delay(1000, 2000);
     }
+
+    // Step 2: DM (1촌이면)
+    if (c.isConnected) {
+      console.log(`  DMing...`);
+      const dmSuccess = await sendDM(page, c.authorProfileUrl, c.dm.content);
+      if (dmSuccess) {
+        c.dm.status = 'sent';
+        console.log(chalk.green(`  DM Sent!`));
+      } else {
+        c.dm.status = 'failed';
+        console.log(chalk.red(`  DM Failed`));
+      }
+    } else {
+      c.dm.status = 'not-connected';
+      console.log(chalk.yellow(`  DM skipped (not connected)`));
+    }
+    writeContacts(contacts);
+
+    // Step 3: 대댓글 (DM 결과에 따라 내용 결정)
+    let replyText: string;
+    if (c.dm.status === 'sent') {
+      replyText = `${displayName}님, DM 곧 보내드리겠습니다 :)`;
+    } else {
+      replyText = `${displayName}님, 1촌이어야 DM을 보내드릴 수 있습니다. 1촌 신청 부탁드립니다 :)`;
+    }
+
+    console.log(`  Replying: "${replyText}"`);
+    const replySuccess = await sendReply(page, c.postUrl, c.authorName, replyText);
+    if (replySuccess) {
+      c.reply.status = 'sent';
+      c.reply.content = replyText;
+      console.log(chalk.green(`  Reply Sent!`));
+    } else {
+      c.reply.content = replyText;
+      console.log(chalk.red(`  Reply Failed`));
+    }
+    writeContacts(contacts);
+    await delay(3000, 7000);
   }
 
-  const sentReplies = replies.filter((r) => r.status === 'sent').length;
-  const sentDMs = messages.filter((m) => m.status === 'sent').length;
-  console.log(chalk.bold(`\nDone! Sent ${sentReplies} replies and ${sentDMs} DMs.`));
+  // === 최종 요약 ===
+  const replySent = contacts.filter(c => c.reply.status === 'sent').length;
+  const replySkipped = contacts.filter(c => c.reply.status === 'skipped').length;
+  const dmSent = contacts.filter(c => c.dm.status === 'sent').length;
+  const dmNotConn = contacts.filter(c => c.dm.status === 'not-connected').length;
+  const dmFailed = contacts.filter(c => c.dm.status === 'failed').length;
+  console.log(chalk.bold(`\nDone!`));
+  console.log(`  Replies: ${replySent} sent, ${replySkipped} skipped`);
+  console.log(`  DMs: ${dmSent} sent, ${dmNotConn} not connected, ${dmFailed} failed`);
 }
