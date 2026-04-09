@@ -13,6 +13,16 @@ export async function scrape(postUrl: string): Promise<void> {
   const existing = readContacts();
   const existingIds = new Set(existing.map(c => c.id));
 
+  // 내 프로필 URL 가져오기 (대댓글 감지용)
+  await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await delay(2000, 3000);
+  const myProfileUrl = await page.evaluate(() => {
+    const link = document.querySelector('a[href*="/in/"]') as HTMLAnchorElement;
+    return link ? link.href.split('?')[0].replace(/\/+$/, '') : '';
+  });
+  const myProfileId = myProfileUrl.split('/in/')[1] || '';
+  console.log(`My profile: ${myProfileId}`);
+
   console.log(`Opening post: ${postUrl}`);
   await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await delay(3000, 5000);
@@ -44,7 +54,7 @@ export async function scrape(postUrl: string): Promise<void> {
   }
 
   // 댓글 수집 + 이미 내가 대댓글 달았는지 체크
-  const rawComments = await page.evaluate(() => {
+  const rawComments = await page.evaluate((myId: string) => {
     const commentEls = document.querySelectorAll('article.comments-comment-entity:not(.comments-comment-entity--reply)');
     return Array.from(commentEls).map((el) => {
       let authorName = '';
@@ -58,7 +68,6 @@ export async function scrape(postUrl: string): Promise<void> {
       const timeEl = el.querySelector('time');
 
       // 이 댓글 아래에 내 대댓글이 있는지 확인
-      // LinkedIn에서 내 댓글은 "You" 또는 프로필 URL에 내 ID가 포함됨
       let hasMyReply = false;
       let sibling = el.nextElementSibling;
       while (sibling) {
@@ -68,24 +77,22 @@ export async function scrape(postUrl: string): Promise<void> {
         if (isNextTopLevel) break;
 
         if (isReply) {
-          // 방법 1: "You" 텍스트 (영문 LinkedIn)
-          const metaText = sibling.querySelector('[class*="post-meta"]')?.textContent || '';
-          if (metaText.includes('You')) { hasMyReply = true; break; }
-
-          // 방법 2: 프로필 링크의 aria-label에 "You" 포함
-          const allLinks = sibling.querySelectorAll('a');
-          for (const link of allLinks) {
-            const ariaLabel = link.getAttribute('aria-label') || '';
-            if (ariaLabel.includes('You')) { hasMyReply = true; break; }
+          // 방법 1: reply 안의 프로필 링크가 내 프로필 URL과 일치
+          const replyLinks = sibling.querySelectorAll('a[href*="/in/"]');
+          for (const link of replyLinks) {
+            const href = (link as HTMLAnchorElement).href || '';
+            if (href.includes(myId)) { hasMyReply = true; break; }
           }
           if (hasMyReply) break;
 
-          // 방법 3: Reply 버튼 aria-label에서 이름 매칭 시도
-          const replyLikeBtn = sibling.querySelector('button[aria-label*="React Like"]');
-          const likeLabel = replyLikeBtn?.getAttribute('aria-label') || '';
-          // "React Like to Sungchan Park's comment" — 이 패턴에서 이름 추출
-          // 내 댓글인 경우 "React Like to your comment" 또는 "your"이 포함
+          // 방법 2: "your" 포함 (영문 LinkedIn)
+          const likeBtn = sibling.querySelector('button[aria-label*="React Like"]');
+          const likeLabel = likeBtn?.getAttribute('aria-label') || '';
           if (likeLabel.toLowerCase().includes('your')) { hasMyReply = true; break; }
+
+          // 방법 3: "You" 텍스트
+          const metaText = sibling.querySelector('[class*="post-meta"]')?.textContent || '';
+          if (metaText.includes('You') || metaText.includes('• You')) { hasMyReply = true; break; }
         }
 
         sibling = sibling.nextElementSibling;
@@ -104,7 +111,7 @@ export async function scrape(postUrl: string): Promise<void> {
         isLiked,
       };
     });
-  });
+  }, myProfileId);
 
   // 좋아요 누르기 (아직 안 누른 댓글만)
   console.log('\nLiking comments...');
