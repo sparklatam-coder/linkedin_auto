@@ -10,7 +10,7 @@ const BATCH_PAUSE_MAX = 5 * 60 * 1000; // 배치 간 5분
 
 // --- 1촌 여부 체크 ---
 async function checkConnection(page: Page, contact: Contact): Promise<boolean> {
-  await page.goto(contact.authorProfileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.goto(contact.authorProfileUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
   await delay(3000, 6000);
   await humanMove(page);
   await humanScroll(page);
@@ -60,7 +60,7 @@ async function findAndClickReply(page: Page, authorName: string): Promise<string
 // --- 대댓글 전송 ---
 async function sendReply(page: Page, postUrl: string, authorName: string, replyText: string): Promise<boolean> {
   try {
-    await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
     await delay(4000, 8000);
     await humanMove(page);
     await humanScroll(page);
@@ -112,7 +112,7 @@ async function sendReply(page: Page, postUrl: string, authorName: string, replyT
 // --- DM 전송 ---
 async function sendDM(page: Page, profileUrl: string, messageText: string): Promise<boolean> {
   try {
-    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
     await delay(4000, 8000);
     await humanMove(page);
     await humanScroll(page);
@@ -128,7 +128,7 @@ async function sendDM(page: Page, profileUrl: string, messageText: string): Prom
     if (!messageHref) return false;
 
     await humanMove(page);
-    await page.goto(messageHref, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(messageHref, { waitUntil: 'domcontentloaded', timeout: 120000 });
     await delay(4000, 8000);
 
     const msgInputSelectors = ['.msg-form__contenteditable', 'div[role="textbox"][contenteditable="true"]', '.msg-form__message-texteditor .ql-editor'];
@@ -231,8 +231,16 @@ export async function send(): Promise<void> {
         c.dm.status = 'sent';
         console.log(chalk.green(`  DM Sent!`));
       } else {
-        c.dm.status = 'failed';
-        console.log(chalk.red(`  DM Failed`));
+        // DM 실패 → 실제로 1촌이 아닐 가능성 높음, 재확인
+        console.log(chalk.red(`  DM Failed — rechecking connection...`));
+        c.isConnected = await checkConnection(page, c);
+        if (!c.isConnected) {
+          c.dm.status = 'not-connected';
+          console.log(chalk.yellow(`  Actually not connected`));
+        } else {
+          c.dm.status = 'failed';
+          console.log(chalk.red(`  Connected but DM failed (technical error)`));
+        }
       }
     } else {
       c.dm.status = 'not-connected';
